@@ -1,7 +1,7 @@
 import os
 import time
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from eqldata import generate_auth_token, get_1MARKET_DATA
 
 # ---------------------------------------------------------
@@ -11,31 +11,56 @@ USERNAME = 'kumarroshanjha786@gmail.com'
 PASSWORD = '7CjFjKHy62m94xD3'
 
 NIFTY_SYMBOL = "NSEIDX:NIFTY_50" 
-TARGET_DATE = "2026-09-17"          # Format: YYYY-MM-DD
+
+# Define Start Date (Today's date will be automatically used as End Date)
+START_DATE = "2025-01-01"
+END_DATE = datetime.today().strftime('%Y-%m-%d') 
 
 # Brick Sizes
 RENKO_BRICK_PCT_3M = 0.103
 RENKO_BRICK_PCT_1M = 0.036
 
-# --- PREVIOUS DAY RENKO ANCHORS ---
+# --- PREVIOUS DAY RENKO ANCHORS (Just before START_DATE) ---
 # Anchor for 3-minute Renko
-PREV_LAST_BRICK_CLOSE_3M = 23221.92  
-PREV_LAST_BRICK_DIR_3M = 'DOWN'       
+PREV_LAST_BRICK_CLOSE_3M = 23640 
+PREV_LAST_BRICK_DIR_3M = 'UP'       
 
 # Anchor for 1-minute Renko
-PREV_LAST_BRICK_CLOSE_1M = 23223.87
-PREV_LAST_BRICK_DIR_1M = 'DOWN'       
+PREV_LAST_BRICK_CLOSE_1M = 24073.20
+PREV_LAST_BRICK_DIR_1M = 'UP'       
 
+NSE_HOLIDAYS_2026 = {
+    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
+    "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01",
+    "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
+    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25"
+}
 
 # ---------------------------------------------------------
-# 2. Fetching & Resampling Data
+# 2. Fetching, Resampling & Date Handling
 # ---------------------------------------------------------
+def get_trading_days(start_str, end_str, holidays):
+    """Generate a list of valid trading dates avoiding weekends and holidays."""
+    start = datetime.strptime(start_str, "%Y-%m-%d")
+    end = datetime.strptime(end_str, "%Y-%m-%d")
+    
+    trading_days = []
+    current = start
+    while current <= end:
+        # 5 = Saturday, 6 = Sunday
+        if current.weekday() < 5:
+            date_str = current.strftime("%Y-%m-%d")
+            if date_str not in holidays:
+                trading_days.append(date_str)
+        current += timedelta(days=1)
+    return trading_days
+
 def fetch_data(token, symbol, date_str):
     print(f"[*] Fetching 1-min data for {symbol} on {date_str}...")
     try:
         raw_data = get_1MARKET_DATA(token, [symbol], date_str)
     except Exception as e:
-        print(f"[X] API Error: {e}")
+        print(f"[X] API Error on {date_str}: {e}")
         return pd.DataFrame()
 
     flat_data = []
@@ -51,6 +76,7 @@ def fetch_data(token, symbol, date_str):
         extract_ticks(raw_data)
         
     if not flat_data:
+        print(f"[-] No valid tick data found for {date_str}")
         return pd.DataFrame()
 
     columns = ['Symbol', 'Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume', 'Extra']
@@ -186,7 +212,7 @@ def run_backtest(renko_1m, renko_3m):
                 trades.append({'Type': 'SELL (Short)', 'Entry Time': entry_time, 'Entry Price': entry_price, 'Exit Time': None, 'Exit Price': None, 'PnL': 0})
 
         elif position == 1:
-            # Exit Long Logic (if 1m close drops below 1m EMA)
+            # Exit Long Logic
             if close_1m < ema_1m:
                 trades[-1]['Exit Time'] = current_time
                 trades[-1]['Exit Price'] = close_1m
@@ -194,14 +220,14 @@ def run_backtest(renko_1m, renko_3m):
                 position = 0
                 
         elif position == -1:
-            # Exit Short Logic (if 1m close rises above 1m EMA)
+            # Exit Short Logic
             if close_1m > ema_1m:
                 trades[-1]['Exit Time'] = current_time
                 trades[-1]['Exit Price'] = close_1m
                 trades[-1]['PnL'] = trades[-1]['Entry Price'] - close_1m
                 position = 0
 
-    # Close open positions at the end of the day
+    # Close open positions at the end of the entire dataset
     if position != 0:
         final_price = renko_1m.iloc[-1]['Close']
         trades[-1]['Exit Time'] = renko_1m.iloc[-1]['Timestamp']
@@ -220,30 +246,44 @@ if __name__ == "__main__":
         print("[X] Auth Failed.")
         exit(1)
 
-    # Fetch and prepare DataFrames
-    df_1m_raw = fetch_data(auth_token, NIFTY_SYMBOL, TARGET_DATE)
+    # 1. Determine valid trading dates
+    trading_dates = get_trading_days(START_DATE, END_DATE, NSE_HOLIDAYS_2026)
+    print(f"[*] Planning to fetch data for {len(trading_dates)} trading days between {START_DATE} and {END_DATE}...")
+
+    # 2. Fetch and aggregate all day data
+    all_1m_data = []
+    for d in trading_dates:
+        daily_df = fetch_data(auth_token, NIFTY_SYMBOL, d)
+        if not daily_df.empty:
+            all_1m_data.append(daily_df)
     
-    if df_1m_raw.empty:
-        print("[!] No data available.")
+    if not all_1m_data:
+        print("[!] No data available for the given date range.")
         exit()
         
+    # Combine into a single continuous DataFrame across the date range
+    df_1m_raw = pd.concat(all_1m_data).sort_index()
+    
     df_1m = df_1m_raw.reset_index()
     df_3m = resample_data(df_1m_raw, "3min")
 
-    print(f"\n[*] Generating 3-Min Renko Chart ({RENKO_BRICK_PCT_3M}%)...")
+    print(f"\n[*] Generating Continuous 3-Min Renko Chart ({RENKO_BRICK_PCT_3M}%)...")
     renko_3m = create_percentage_renko(df_3m, RENKO_BRICK_PCT_3M, PREV_LAST_BRICK_CLOSE_3M, PREV_LAST_BRICK_DIR_3M)
     renko_3m = add_indicators(renko_3m)
 
-    print(f"[*] Generating 1-Min Renko Chart ({RENKO_BRICK_PCT_1M}%)...")
+    print(f"[*] Generating Continuous 1-Min Renko Chart ({RENKO_BRICK_PCT_1M}%)...")
     renko_1m = create_percentage_renko(df_1m, RENKO_BRICK_PCT_1M, PREV_LAST_BRICK_CLOSE_1M, PREV_LAST_BRICK_DIR_1M)
     renko_1m = add_indicators(renko_1m)
 
-    # Print Samples
-    print("\n--- 3 MINUTE RENKO (LAST 5 BRICKS) ---")
-    print(renko_3m[['Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction']].tail())
+    # Format Pandas to output all rows for the console request
+    pd.set_option('display.max_rows', None)
 
-    print("\n--- 1 MINUTE RENKO (LAST 5 BRICKS) ---")
-    print(renko_1m[['Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction']].tail())
+    # Print Samples (ALL BRICKS)
+    print("\n--- 3 MINUTE RENKO (ALL BRICKS) ---")
+    print(renko_3m[['Brick', 'Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
+
+    print("\n--- 1 MINUTE RENKO (ALL BRICKS) ---")
+    print(renko_1m[['Brick', 'Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
 
     # Run Backtest
     print("\n[*] Running Trading Strategy Backtest...")
@@ -260,7 +300,7 @@ if __name__ == "__main__":
         print(f"Net Points (PnL)  : {total_pnl:.2f} points")
         
         # Save to Excel
-        filename = f"renko_trades_{TARGET_DATE}.xlsx"
+        filename = f"renko_trades_{START_DATE}_to_{END_DATE}.xlsx"
         trades_df.to_excel(filename, index=False)
         print(f"\n[+] Trade results successfully exported to: {filename}")
     else:
