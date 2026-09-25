@@ -13,7 +13,7 @@ PASSWORD = '7CjFjKHy62m94xD3'
 NIFTY_SYMBOL = "NSEIDX:NIFTY_50" 
 
 # Define Start Date (Today's date will be automatically used as End Date)
-START_DATE = "2025-01-01"
+START_DATE = "2025-01-01"          # Format: YYYY-MM-DD
 END_DATE = datetime.today().strftime('%Y-%m-%d') 
 
 # Brick Sizes
@@ -22,7 +22,7 @@ RENKO_BRICK_PCT_1M = 0.036
 
 # --- PREVIOUS DAY RENKO ANCHORS (Just before START_DATE) ---
 # Anchor for 3-minute Renko
-PREV_LAST_BRICK_CLOSE_3M = 23640 
+PREV_LAST_BRICK_CLOSE_3M = 24078.60  
 PREV_LAST_BRICK_DIR_3M = 'UP'       
 
 # Anchor for 1-minute Renko
@@ -33,11 +33,55 @@ NSE_HOLIDAYS_2026 = {
     "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
     "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01",
     "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
-    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25"
+    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+    "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", 
+    "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15", 
+    "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22", 
+    "2025-11-05", "2025-12-25",
 }
 
 # ---------------------------------------------------------
-# 2. Fetching, Resampling & Date Handling
+# 2. Rate-Limit Wrapper Function
+# ---------------------------------------------------------
+def safe_fetch_market_data(token, instrument_list, target_date):
+    max_retries = 5
+    wait_time = 30  # Initial wait time in seconds
+
+    for attempt in range(max_retries):
+        try:
+            result = get_1MARKET_DATA(token, instrument_list, target_date)
+            
+            # Check for valid list-based response
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                return result
+
+            # Check for API-level rate limit message
+            result_str = str(result).lower()
+            if "too many requests" in result_str or "429" in result_str:
+                print(f" [!] Intraday Rate Limited. Waiting {wait_time}s (Attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait_time)
+                wait_time += 10  # Increase wait time by 10s for the next try
+                continue
+
+            return result
+            
+        except Exception as e:
+            # Check for Exception-level rate limit message
+            error_str = str(e).lower()
+            if "too many requests" in error_str or "429" in error_str:
+                print(f" [!] Intraday Rate Limited (Exception). Waiting {wait_time}s (Attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait_time)
+                wait_time += 10  # Increase wait time by 10s for the next try
+                continue
+            else:
+                print(f" [X] Unexpected Intraday API Error: {e}")
+                return None
+                
+    print(f" [X] Max retries reached for {target_date}. Skipping.")
+    return None
+
+# ---------------------------------------------------------
+# 3. Fetching, Resampling & Date Handling
 # ---------------------------------------------------------
 def get_trading_days(start_str, end_str, holidays):
     """Generate a list of valid trading dates avoiding weekends and holidays."""
@@ -57,10 +101,11 @@ def get_trading_days(start_str, end_str, holidays):
 
 def fetch_data(token, symbol, date_str):
     print(f"[*] Fetching 1-min data for {symbol} on {date_str}...")
-    try:
-        raw_data = get_1MARKET_DATA(token, [symbol], date_str)
-    except Exception as e:
-        print(f"[X] API Error on {date_str}: {e}")
+    
+    # Use the safe fetch wrapper instead of direct API call
+    raw_data = safe_fetch_market_data(token, [symbol], date_str)
+    
+    if not raw_data:
         return pd.DataFrame()
 
     flat_data = []
@@ -72,7 +117,7 @@ def fetch_data(token, symbol, date_str):
                 else:
                     extract_ticks(item)
                     
-    if raw_data and isinstance(raw_data, list):
+    if isinstance(raw_data, list):
         extract_ticks(raw_data)
         
     if not flat_data:
@@ -96,7 +141,7 @@ def resample_data(df, timeframe):
 
 
 # ---------------------------------------------------------
-# 3. Renko Engine & Indicators
+# 4. Renko Engine & Indicators
 # ---------------------------------------------------------
 def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir):
     if df.empty: return pd.DataFrame()
@@ -169,7 +214,7 @@ def add_indicators(df):
 
 
 # ---------------------------------------------------------
-# 4. Strategy Backtesting Engine
+# 5. Strategy Backtesting Engine
 # ---------------------------------------------------------
 def run_backtest(renko_1m, renko_3m):
     trades = []
@@ -238,7 +283,7 @@ def run_backtest(renko_1m, renko_3m):
 
 
 # ---------------------------------------------------------
-# 5. Main Execution
+# 6. Main Execution
 # ---------------------------------------------------------
 if __name__ == "__main__":
     auth_token = generate_auth_token(USERNAME, PASSWORD)
