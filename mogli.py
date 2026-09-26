@@ -13,7 +13,7 @@ PASSWORD = '7CjFjKHy62m94xD3'
 NIFTY_SYMBOL = "NSEIDX:NIFTY_50" 
 
 # Define Start Date (Today's date will be automatically used as End Date)
-START_DATE = "2025-01-01"          # Format: YYYY-MM-DD
+START_DATE = "2026-09-01"          # Format: YYYY-MM-DD
 END_DATE = datetime.today().strftime('%Y-%m-%d') 
 
 # Brick Sizes
@@ -22,11 +22,11 @@ RENKO_BRICK_PCT_1M = 0.036
 
 # --- PREVIOUS DAY RENKO ANCHORS (Just before START_DATE) ---
 # Anchor for 3-minute Renko
-PREV_LAST_BRICK_CLOSE_3M = 24078.60  
+PREV_LAST_BRICK_CLOSE_3M = 24072.00  
 PREV_LAST_BRICK_DIR_3M = 'UP'       
 
 # Anchor for 1-minute Renko
-PREV_LAST_BRICK_CLOSE_1M = 24073.20
+PREV_LAST_BRICK_CLOSE_1M = 24072.00
 PREV_LAST_BRICK_DIR_1M = 'UP'       
 
 NSE_HOLIDAYS_2026 = {
@@ -163,13 +163,13 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir):
                 if current_close >= (last_brick_close + rounded_pts):
                     brick_open = last_brick_close
                     brick_close = last_brick_close + rounded_pts
-                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Direction': 'UP', 'Visual': '🟩 GREEN'})
+                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Candle_Close': current_close, 'Direction': 'UP', 'Visual': '🟩 GREEN'})
                     last_brick_close = brick_close
                     brick_num += 1
                 elif current_close <= (last_brick_close - (2 * rounded_pts)):
                     brick_open = last_brick_close - rounded_pts
                     brick_close = last_brick_close - (2 * rounded_pts)
-                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Direction': 'DOWN', 'Visual': '🟥 RED'})
+                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Candle_Close': current_close, 'Direction': 'DOWN', 'Visual': '🟥 RED'})
                     last_brick_close = brick_close
                     current_direction = 'DOWN'
                     brick_num += 1
@@ -179,13 +179,13 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir):
                 if current_close <= (last_brick_close - rounded_pts):
                     brick_open = last_brick_close
                     brick_close = last_brick_close - rounded_pts
-                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Direction': 'DOWN', 'Visual': '🟥 RED'})
+                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Candle_Close': current_close, 'Direction': 'DOWN', 'Visual': '🟥 RED'})
                     last_brick_close = brick_close
                     brick_num += 1
                 elif current_close >= (last_brick_close + (2 * rounded_pts)):
                     brick_open = last_brick_close + rounded_pts
                     brick_close = last_brick_close + (2 * rounded_pts)
-                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Direction': 'UP', 'Visual': '🟩 GREEN'})
+                    renko_bricks.append({'Brick': brick_num, 'Timestamp': timestamp, 'Open': brick_open, 'Close': brick_close, 'Candle_Close': current_close, 'Direction': 'UP', 'Visual': '🟩 GREEN'})
                     last_brick_close = brick_close
                     current_direction = 'UP'
                     brick_num += 1
@@ -196,7 +196,7 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir):
 def add_indicators(df):
     if df.empty: return df
     
-    # Calculate 9 EMA
+    # Calculate 9 EMA (Using the Brick Close for Indicator math as standard for Renko)
     df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
     
     # Calculate RSI (14) - Wilder's Smoothing
@@ -219,12 +219,11 @@ def add_indicators(df):
 def run_backtest(renko_1m, renko_3m):
     trades = []
     position = 0 # 0 = Flat, 1 = Long, -1 = Short
-    entry_price = 0.0
-    entry_time = None
     
     for idx_1m, row_1m in renko_1m.iterrows():
         current_time = row_1m['Timestamp']
-        close_1m = row_1m['Close']
+        close_1m = row_1m['Close']            # Brick Close for indicators/conditions
+        candle_close = row_1m['Candle_Close'] # Actual 1-min candle close for Execution price
         ema_1m = row_1m['EMA_9']
         
         # Get the latest 3M state that occurred AT OR BEFORE this 1M brick
@@ -243,41 +242,60 @@ def run_backtest(renko_1m, renko_3m):
         
         # Strategy Logic
         if position == 0:
-            # Entry Logic
             if trend_3m_is_positive and (rsi_3m < 70) and (close_1m > ema_1m):
                 position = 1
-                entry_price = close_1m
-                entry_time = current_time
-                trades.append({'Type': 'BUY (Long)', 'Entry Time': entry_time, 'Entry Price': entry_price, 'Exit Time': None, 'Exit Price': None, 'PnL': 0})
+                trades.append({
+                    'Type': 'BUY', 
+                    'Entry Time': current_time, 
+                    'Entry Price (Candle)': candle_close,
+                    'Entry EMA_1M': ema_1m,
+                    'Entry EMA_3M': ema_3m,
+                    'Entry RSI_3M': rsi_3m,
+                    'Exit Time': None, 
+                    'Exit Price (Candle)': None, 
+                    'Exit EMA_1M': None,
+                    'PnL': 0
+                })
                 
             elif trend_3m_is_negative and (rsi_3m > 30) and (close_1m < ema_1m):
                 position = -1
-                entry_price = close_1m
-                entry_time = current_time
-                trades.append({'Type': 'SELL (Short)', 'Entry Time': entry_time, 'Entry Price': entry_price, 'Exit Time': None, 'Exit Price': None, 'PnL': 0})
+                trades.append({
+                    'Type': 'SELL', 
+                    'Entry Time': current_time, 
+                    'Entry Price (Candle)': candle_close,
+                    'Entry EMA_1M': ema_1m,
+                    'Entry EMA_3M': ema_3m,
+                    'Entry RSI_3M': rsi_3m,
+                    'Exit Time': None, 
+                    'Exit Price (Candle)': None, 
+                    'Exit EMA_1M': None,
+                    'PnL': 0
+                })
 
         elif position == 1:
-            # Exit Long Logic
             if close_1m < ema_1m:
                 trades[-1]['Exit Time'] = current_time
-                trades[-1]['Exit Price'] = close_1m
-                trades[-1]['PnL'] = close_1m - trades[-1]['Entry Price']
+                trades[-1]['Exit Price (Candle)'] = candle_close
+                trades[-1]['Exit EMA_1M'] = ema_1m
+                trades[-1]['PnL'] = candle_close - trades[-1]['Entry Price (Candle)']
                 position = 0
                 
         elif position == -1:
-            # Exit Short Logic
             if close_1m > ema_1m:
                 trades[-1]['Exit Time'] = current_time
-                trades[-1]['Exit Price'] = close_1m
-                trades[-1]['PnL'] = trades[-1]['Entry Price'] - close_1m
+                trades[-1]['Exit Price (Candle)'] = candle_close
+                trades[-1]['Exit EMA_1M'] = ema_1m
+                trades[-1]['PnL'] = trades[-1]['Entry Price (Candle)'] - candle_close
                 position = 0
 
-    # Close open positions at the end of the entire dataset
+    # Close open positions at the end of the dataset
     if position != 0:
-        final_price = renko_1m.iloc[-1]['Close']
-        trades[-1]['Exit Time'] = renko_1m.iloc[-1]['Timestamp']
-        trades[-1]['Exit Price'] = final_price
-        trades[-1]['PnL'] = (final_price - trades[-1]['Entry Price']) if position == 1 else (trades[-1]['Entry Price'] - final_price)
+        final_row = renko_1m.iloc[-1]
+        final_price = final_row['Candle_Close']
+        trades[-1]['Exit Time'] = final_row['Timestamp']
+        trades[-1]['Exit Price (Candle)'] = final_price
+        trades[-1]['Exit EMA_1M'] = final_row['EMA_9']
+        trades[-1]['PnL'] = (final_price - trades[-1]['Entry Price (Candle)']) if position == 1 else (trades[-1]['Entry Price (Candle)'] - final_price)
 
     return pd.DataFrame(trades)
 
@@ -325,28 +343,27 @@ if __name__ == "__main__":
 
     # Print Samples (ALL BRICKS)
     print("\n--- 3 MINUTE RENKO (ALL BRICKS) ---")
-    print(renko_3m[['Brick', 'Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
+    print(renko_3m[['Brick', 'Timestamp', 'Close', 'Candle_Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
 
     print("\n--- 1 MINUTE RENKO (ALL BRICKS) ---")
-    print(renko_1m[['Brick', 'Timestamp', 'Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
+    print(renko_1m[['Brick', 'Timestamp', 'Close', 'Candle_Close', 'EMA_9', 'RSI_14', 'Direction', 'Visual']].to_string(index=False))
 
     # Run Backtest
     print("\n[*] Running Trading Strategy Backtest...")
     trades_df = run_backtest(renko_1m, renko_3m)
+    
+    # Save everything to a multi-sheet Excel file
+    filename = f"Renko_Data_and_Trades_{START_DATE}_to_{END_DATE}.xlsx"
+    
+    # Convert timestamps to naive for Excel compatibility (removes timezone warnings)
+    for df in [trades_df, renko_1m, renko_3m]:
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.tz_localize(None)
 
-    if not trades_df.empty:
-        total_pnl = trades_df['PnL'].sum()
-        print("\n" + "="*85)
-        print(f"{'TRADE LOG':^85}")
-        print("="*85)
-        print(trades_df.to_string(index=False))
-        print("="*85)
-        print(f"Total Trades Taken: {len(trades_df)}")
-        print(f"Net Points (PnL)  : {total_pnl:.2f} points")
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        trades_df.to_excel(writer, sheet_name='Trade_Log', index=False)
+        renko_3m.to_excel(writer, sheet_name='Renko_3M_Data', index=False)
+        renko_1m.to_excel(writer, sheet_name='Renko_1M_Data', index=False)
         
-        # Save to Excel
-        filename = f"renko_trades_{START_DATE}_to_{END_DATE}.xlsx"
-        trades_df.to_excel(filename, index=False)
-        print(f"\n[+] Trade results successfully exported to: {filename}")
-    else:
-        print("\n[!] No trades were triggered based on the strategy conditions.")
+    print(f"\n[+] Full dataset (Trades, 1M Bricks, 3M Bricks) successfully exported to: {filename}")
