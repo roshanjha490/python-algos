@@ -405,7 +405,7 @@ if auth_token:
     today = datetime.now()
 
     # Ask for 22 days (Roughly 1 trading month of history)
-    target_dates = get_last_n_trading_days(today, 22)
+    target_dates = get_last_n_trading_days(today, 7)
 
     print(f"Calculated Valid Trading Days: {target_dates}\n")
     print(f"Starting fetch for {len(instruments)} instruments...")

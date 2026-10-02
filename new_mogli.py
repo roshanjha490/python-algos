@@ -13,8 +13,11 @@ PASSWORD = '7CjFjKHy62m94xD3'
 NIFTY_SYMBOL = "NSEIDX:NIFTY_50" 
 
 # Define Start Date (Today's date will be automatically used as End Date)
-START_DATE = "2026-09-01"          
+START_DATE = "2026-08-01"         
 END_DATE = datetime.today().strftime('%Y-%m-%d') 
+
+BACKTEST_START_DATE = "2026-09-01"
+# FETCH_START_DATE = "2026-08-15" # Warm-up buffer
 
 # Brick Sizes
 RENKO_BRICK_PCT_3M = 0.103
@@ -25,12 +28,12 @@ RENKO_BRICK_FIXED_1M = 8.5
 
 # --- PREVIOUS DAY RENKO ANCHORS (Just before START_DATE) ---
 # Anchor for 3-minute Renko
-PREV_LAST_BRICK_CLOSE_3M = 24072.00  
+PREV_LAST_BRICK_CLOSE_3M = 24408.00  
 PREV_LAST_BRICK_DIR_3M = 'UP'       
 
 # Anchor for 1-minute Renko
-PREV_LAST_BRICK_CLOSE_1M = 24072.00
-PREV_LAST_BRICK_DIR_1M = 'UP'       
+PREV_LAST_BRICK_CLOSE_1M = 24369.50
+PREV_LAST_BRICK_DIR_1M = 'DOWN'       
 
 NSE_HOLIDAYS_2026 = {
     "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
@@ -157,6 +160,9 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
         current_close = row['Close']
         timestamp = row['Timestamp']
 
+        # NEW: Track which brick this is WITHIN the current candle
+        candle_brick_num = 1 
+
         while True:
             # Calculate dynamic brick size for the current price level
             raw_pts = last_brick_close * (brick_pct / 100.0)
@@ -171,6 +177,7 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     brick_close = last_brick_close + rounded_pts
                     renko_bricks.append({
                         'Brick': brick_num, 
+                        'Candle_Brick_Num': candle_brick_num, # Added sub-counter
                         'Timestamp': timestamp, 
                         'Brick_Opening_Price': brick_open,
                         'Brick_Closing_Price': brick_close, 
@@ -182,11 +189,13 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     })
                     last_brick_close = brick_close
                     brick_num += 1
+                    candle_brick_num += 1
                 elif current_close <= (last_brick_close - (2 * rounded_pts)):
                     brick_open = last_brick_close - rounded_pts
                     brick_close = last_brick_close - (2 * rounded_pts)
                     renko_bricks.append({
                         'Brick': brick_num, 
+                        'Candle_Brick_Num': candle_brick_num, # Added sub-counter
                         'Timestamp': timestamp, 
                         'Brick_Opening_Price': brick_open,
                         'Brick_Closing_Price': brick_close, 
@@ -199,6 +208,7 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     last_brick_close = brick_close
                     current_direction = 'DOWN'
                     brick_num += 1
+                    candle_brick_num += 1
                 else: break
 
             elif current_direction == 'DOWN':
@@ -207,6 +217,7 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     brick_close = last_brick_close - rounded_pts
                     renko_bricks.append({
                         'Brick': brick_num, 
+                        'Candle_Brick_Num': candle_brick_num, # Added sub-counter
                         'Timestamp': timestamp, 
                         'Brick_Opening_Price': brick_open,
                         'Brick_Closing_Price': brick_close, 
@@ -218,11 +229,13 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     })
                     last_brick_close = brick_close
                     brick_num += 1
+                    candle_brick_num += 1
                 elif current_close >= (last_brick_close + (2 * rounded_pts)):
                     brick_open = last_brick_close + rounded_pts
                     brick_close = last_brick_close + (2 * rounded_pts)
                     renko_bricks.append({
                         'Brick': brick_num, 
+                        'Candle_Brick_Num': candle_brick_num, # Added sub-counter
                         'Timestamp': timestamp, 
                         'Brick_Opening_Price': brick_open,
                         'Brick_Closing_Price': brick_close, 
@@ -235,6 +248,7 @@ def create_percentage_renko(df, brick_pct, anchor_close, anchor_dir, fixed_brick
                     last_brick_close = brick_close
                     current_direction = 'UP'
                     brick_num += 1
+                    candle_brick_num += 1
                 else: break
 
     return pd.DataFrame(renko_bricks)
@@ -265,7 +279,7 @@ def add_indicators(df):
 
 
 # ---------------------------------------------------------
-# 5. Strategy Backtesting Engine
+# 5. Strategy Backtesting Engine (REVERSED)
 # ---------------------------------------------------------
 def run_backtest(renko_1m, renko_3m):
     trades = []
@@ -273,77 +287,146 @@ def run_backtest(renko_1m, renko_3m):
 
     for idx_1m, row_1m in renko_1m.iterrows():
         current_time = row_1m['Timestamp']
+        
+        # 1-Min Brick Data
+        brick_id_1m = row_1m['Brick']
+        candle_brick_num_1m = row_1m['Candle_Brick_Num']
         close_1m = row_1m['Brick_Closing_Price'] 
-        candle_close = row_1m['Candle_Closing'] # Using actual minute close for realistic PnL[cite: 1]
+        candle_close = row_1m['Candle_Closing'] 
         ema_1m = row_1m['EMA_9']
         
-        # Get the latest 3M state that occurred AT OR BEFORE this 1M brick
+        # Intraday Square-Off Check (Unused currently in logic, but left intact)
+        is_eod = (current_time.hour == 15 and current_time.minute >= 15)                
+        if is_eod:
+            if position != 0:
+                trades[-1].update({
+                    'Exit_Time': current_time,
+                    'Exit_1M_Brick_ID': brick_id_1m,
+                    'Exit_1M_Candle_Brick_Num': candle_brick_num_1m,
+                    'Exit_Price_Candle': candle_close,
+                    'Exit_1M_Renko_Close': close_1m,
+                    'Exit_1M_EMA': ema_1m,
+                    'PnL_Index_Points': (candle_close - trades[-1]['Entry_Price_Candle']) if position == 1 else (trades[-1]['Entry_Price_Candle'] - candle_close),
+                    'Exit_Reason': 'EOD Square-Off'
+                })
+                position = 0
+            
+            # Skip the rest of the loop to prevent opening new trades after 15:14
+            continue
+        
         past_3m_bricks = renko_3m[renko_3m['Timestamp'] <= current_time]
         if past_3m_bricks.empty:
             continue
             
+        # 3-Min Brick Data
         latest_3m = past_3m_bricks.iloc[-1]
+        brick_id_3m = latest_3m['Brick']
         close_3m = latest_3m['Brick_Closing_Price']
         ema_3m = latest_3m['EMA_9']
         rsi_3m = latest_3m['RSI_14']
         
-        # Determine 3-min Trend Conditions
-        trend_3m_is_positive = (close_3m > ema_3m)
-        trend_3m_is_negative = (close_3m < ema_3m)
+        trend_3m_is_bullish = (close_3m > ema_3m)
+        trend_3m_is_bearish = (close_3m < ema_3m)
         
-        # Strategy Logic (Entry)
+        # Strategy Logic (Entry - REVERSED)
         if position == 0:
-            if trend_3m_is_positive and (rsi_3m < 70) and (close_1m > ema_1m):
+            # REVERSE SELL: Trigger Short on old Bullish setup
+            if trend_3m_is_bullish and (rsi_3m < 70) and (close_1m > ema_1m):
                 position = 1
                 trades.append({
-                    'Type': 'BUY', 
-                    'Entry_Time': current_time, 
+                    'Type': 'BUY',
+                    'Entry_Time': current_time,
+                    'Entry_1M_Brick_ID': brick_id_1m,
+                    'Entry_1M_Candle_Brick_Num': candle_brick_num_1m, # e.g. "Brick 2 of this minute"
+                    'Entry_3M_Brick_ID': brick_id_3m,
                     'Entry_Price_Candle': candle_close,
+                    'Entry_1M_Renko_Close': close_1m,
                     'Entry_1M_EMA': ema_1m,
-                    '3M_RSI_Value': rsi_3m,
+                    'Entry_3M_EMA': ema_3m,
+                    'Entry_3M_RSI': rsi_3m,
+                    
+                    # Placeholders for Exit
                     'Exit_Time': None, 
+                    'Exit_1M_Brick_ID': None,
+                    'Exit_1M_Candle_Brick_Num': None,
                     'Exit_Price_Candle': None, 
-                    'PnL_Index_Points': 0
+                    'Exit_1M_Renko_Close': None,
+                    'Exit_1M_EMA': None,
+                    'PnL_Index_Points': 0,
+                    'Exit_Reason': None
                 })
                 
-            elif trend_3m_is_negative and (rsi_3m > 30) and (close_1m < ema_1m):
+            # REVERSE BUY: Trigger Long on old Bearish setup
+            elif trend_3m_is_bearish and (rsi_3m > 30) and (close_1m < ema_1m):
                 position = -1
                 trades.append({
                     'Type': 'SELL', 
-                    'Entry_Time': current_time, 
+                    'Entry_Time': current_time,
+                    'Entry_1M_Brick_ID': brick_id_1m,
+                    'Entry_1M_Candle_Brick_Num': candle_brick_num_1m,
+                    'Entry_3M_Brick_ID': brick_id_3m,
                     'Entry_Price_Candle': candle_close,
+                    'Entry_1M_Renko_Close': close_1m,
                     'Entry_1M_EMA': ema_1m,
-                    '3M_RSI_Value': rsi_3m,
+                    'Entry_3M_EMA': ema_3m,
+                    'Entry_3M_RSI': rsi_3m,
+                    
+                    # Placeholders for Exit
                     'Exit_Time': None, 
+                    'Exit_1M_Brick_ID': None,
+                    'Exit_1M_Candle_Brick_Num': None,
                     'Exit_Price_Candle': None, 
-                    'PnL_Index_Points': 0
+                    'Exit_1M_Renko_Close': None,
+                    'Exit_1M_EMA': None,
+                    'PnL_Index_Points': 0,
+                    'Exit_Reason': None
                 })
 
-        # Strategy Logic (Exit & PnL Calculation)
+        # Strategy Logic (Exit - REVERSED)
         elif position == 1:
+            # Long Exit: Flatten when 1-min brick closes back ABOVE 1-min 9 EMA
             if close_1m < ema_1m:
-                trades[-1]['Exit_Time'] = current_time
-                trades[-1]['Exit_Price_Candle'] = candle_close
-                trades[-1]['PnL_Index_Points'] = candle_close - trades[-1]['Entry_Price_Candle']
+                trades[-1].update({
+                    'Exit_Time': current_time,
+                    'Exit_1M_Brick_ID': brick_id_1m,
+                    'Exit_1M_Candle_Brick_Num': candle_brick_num_1m,
+                    'Exit_Price_Candle': candle_close,
+                    'Exit_1M_Renko_Close': close_1m,
+                    'Exit_1M_EMA': ema_1m,
+                    'PnL_Index_Points': candle_close - trades[-1]['Entry_Price_Candle'],
+                    'Exit_Reason': 'Strategy Exit'
+                })
                 position = 0 
                 
         elif position == -1:
+            # Short Exit: Flatten when 1-min brick closes back BELOW 1-min 9 EMA
             if close_1m > ema_1m:
-                trades[-1]['Exit_Time'] = current_time
-                trades[-1]['Exit_Price_Candle'] = candle_close
-                trades[-1]['PnL_Index_Points'] = trades[-1]['Entry_Price_Candle'] - candle_close
+                trades[-1].update({
+                    'Exit_Time': current_time,
+                    'Exit_1M_Brick_ID': brick_id_1m,
+                    'Exit_1M_Candle_Brick_Num': candle_brick_num_1m,
+                    'Exit_Price_Candle': candle_close,
+                    'Exit_1M_Renko_Close': close_1m,
+                    'Exit_1M_EMA': ema_1m,
+                    'PnL_Index_Points': trades[-1]['Entry_Price_Candle'] - candle_close,
+                    'Exit_Reason': 'Strategy Exit'
+                })
                 position = 0
 
-    # Close any open position at the very end of the dataset[cite: 1]
+    # Close any open position at the very end of the dataset
     if position != 0 and len(trades) > 0:
         final_row = renko_1m.iloc[-1]
         final_price = final_row['Candle_Closing']
-        trades[-1]['Exit_Time'] = final_row['Timestamp']
-        trades[-1]['Exit_Price_Candle'] = final_price
-        if position == 1:
-            trades[-1]['PnL_Index_Points'] = final_price - trades[-1]['Entry_Price_Candle']
-        else:
-            trades[-1]['PnL_Index_Points'] = trades[-1]['Entry_Price_Candle'] - final_price
+        trades[-1].update({
+            'Exit_Time': final_row['Timestamp'],
+            'Exit_1M_Brick_ID': final_row['Brick'],
+            'Exit_1M_Candle_Brick_Num': final_row['Candle_Brick_Num'],
+            'Exit_Price_Candle': final_price,
+            'Exit_1M_Renko_Close': final_row['Brick_Closing_Price'],
+            'Exit_1M_EMA': final_row['EMA_9'],
+            'PnL_Index_Points': (final_price - trades[-1]['Entry_Price_Candle']) if position == 1 else (trades[-1]['Entry_Price_Candle'] - final_price),
+            'Exit_Reason': 'End of Data'
+        })
 
     return pd.DataFrame(trades)
 
@@ -390,7 +473,9 @@ if __name__ == "__main__":
     
     # Run Backtest
     print("\n[*] Running Trading Strategy Backtest...")
-    trades_df = run_backtest(renko_1m, renko_3m)
+    renko_3m_test = renko_3m[renko_3m['Timestamp'] >= BACKTEST_START_DATE]
+    renko_1m_test = renko_1m[renko_1m['Timestamp'] >= BACKTEST_START_DATE]
+    trades_df = run_backtest(renko_1m_test, renko_3m_test)
 
     # Calculate and Print Total PnL
     if not trades_df.empty:
